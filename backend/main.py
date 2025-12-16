@@ -1,3 +1,5 @@
+# We start by importing necessary modules and setting up FastAPI
+
 from datetime import datetime
 from typing import List, Optional, Dict
 
@@ -536,7 +538,7 @@ Given a single inventory submission in JSON format:
 - List the top categories involved.
 - Flag anything that looks unusually high or important.
 
-Respond strictly in JSON with the following keys:
+Respond strictly in JSON with the following  s:
 - summary
 - top_categories
 - alerts
