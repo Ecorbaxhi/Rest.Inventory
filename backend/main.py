@@ -236,6 +236,17 @@ def health_check():
     return {"status": "ok", "app": "Rest.Inventory"}
 
 
+from backend.db import db_ping
+
+@app.get("/db/health")
+def db_health():
+    try:
+        db_ping()
+        return {"db": "ok"}
+    except Exception as e:
+        return {"db": "error", "detail": str(e)}
+
+
 # -------------------------------------------------
 # User endpoints
 # -------------------------------------------------
