@@ -3,3 +3,7 @@ uvicorn[standard]
 pydantic
 python-dotenv
 google-generativeai
+sqlalchemy
+psycopg[binary]
+sqlalchemy
+psycopg2-binary

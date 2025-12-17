@@ -19,6 +19,9 @@ from collections import Counter
 
 from fastapi.responses import HTMLResponse
 
+from sqlalchemy import text
+from sqlalchemy import create_engine
+
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -234,6 +237,29 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 @app.get("/health")
 def health_check():
     return {"status": "ok", "app": "Rest.Inventory"}
+
+def get_db_engine():
+    db_url = os.environ.get("DATABASE_URL")
+    if not db_url:
+        raise HTTPException(status_code=500, detail="DATABASE_URL is not set")
+
+    # Supabase often requires SSL
+    if "sslmode=" not in db_url:
+        db_url = db_url + ("&" if "?" in db_url else "?") + "sslmode=require"
+
+    return create_engine(db_url, pool_pre_ping=True)
+
+
+@app.get("/db/health")
+def db_health():
+    try:
+        engine = get_db_engine()
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        return {"db": "ok"}
+    except Exception as e:
+        return {"db": "error", "detail": str(e)}
+
 
 
 from backend.db import db_ping
