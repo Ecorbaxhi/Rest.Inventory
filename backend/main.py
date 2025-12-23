@@ -21,7 +21,7 @@ from fastapi.responses import HTMLResponse
 
 from sqlalchemy import text
 from sqlalchemy import create_engine
-
+from backend.db import db_ping
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -253,12 +253,11 @@ def get_db_engine():
 @app.get("/db/health")
 def db_health():
     try:
-        engine = get_db_engine()
-        with engine.connect() as conn:
-            conn.execute(text("SELECT 1"))
-        return {"db": "ok"}
+        db_ping()
+        return {"status": "ok", "database": "connected"}
     except Exception as e:
-        return {"db": "error", "detail": str(e)}
+        return {"status": "error", "database": "not connected", "detail": str(e)}
+
 
 
 
