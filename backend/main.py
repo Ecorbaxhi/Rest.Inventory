@@ -13,7 +13,7 @@ from pathlib import Path
 
 import os
 import json
-import google.generativeai as genai
+from google import genai
 from fastapi import FastAPI, HTTPException, Depends, Response
 from collections import Counter
 
@@ -238,6 +238,17 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 def health_check():
     return {"status": "ok", "app": "Rest.Inventory"}
 
+from backend.db import db_ping
+
+@app.get("/db/health")
+def db_health():
+    try:
+        db_ping()
+        return {"db": "ok"}
+    except Exception as e:
+        return {"db": "error", "detail": str(e)}
+
+
 def get_db_engine():
     db_url = os.environ.get("DATABASE_URL")
     if not db_url:
@@ -257,7 +268,6 @@ def db_health():
         return {"status": "ok", "database": "connected"}
     except Exception as e:
         return {"status": "error", "database": "not connected", "detail": str(e)}
-
 
 
 
