@@ -1617,7 +1617,14 @@ UI_HTML = """
   <meta charset="utf-8" />
   <title>Rest.Inventory Demo UI</title>
   <style>
-    body { font-family: Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 12px; }
+    body {
+      font-family: Arial, sans-serif;
+      background: #5f7451;
+      color: #1f1f1f;
+      max-width: 900px;
+      margin: 24px auto;
+      padding: 0 12px;
+  }
     .card { border: 1px solid #ddd; border-radius: 10px; padding: 14px; margin-bottom: 14px; }
     input, textarea, select { width: 100%; padding: 8px; margin-top: 6px; margin-bottom: 10px; }
     button { padding: 10px 14px; cursor: pointer; }
