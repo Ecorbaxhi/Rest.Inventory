@@ -25,6 +25,8 @@ from backend.db import db_ping, engine
 
 from backend.db_users import db_get_user_by_email, db_create_user
 
+from fastapi.staticfiles import StaticFiles
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -45,6 +47,8 @@ def hash_password(password: str) -> str:
 
 
 app = FastAPI(title="Rest.Inventory API")
+
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # -------------------------------------------------
 # Models for Users
@@ -1636,10 +1640,10 @@ UI_HTML = """
   </style>
 </head>
 <body>
-  <h1>Rest.Inventory — Demo UI</h1>
-  <p>This page calls your FastAPI endpoints directly (same server). Token is stored in localStorage.</p>
+  <h1>Rest.Inventory - Fiorentini Restaurant</h1>
+  <p>Inventory management system for Fiorentini Restaurant.</p>
 
-  <div class="card" id="createUserCard" style="display:none;">
+  <div class="card owner-admin-section" id="createUserCard">
     <h2>1) Create User</h2>
     <div class="row">
       <div>
@@ -1669,16 +1673,29 @@ UI_HTML = """
     <button onclick="createUser()">Create user</button>
   </div>
 
-  <div id="loginSection">
-    <div class="card">
-      <h2>Login</h2>
+<div id="loginSection">
+  <div class="card">
+    <h2>Login</h2>
+
     <label>Email</label>
     <input id="li_email" placeholder="owner@test.com" />
     <label>Password</label>
     <input id="li_password" placeholder="1234" />
     <button onclick="login()">Login</button>
-    <p>Token: <code id="token_box">(none)</code></p>
-    <button onclick="logout()">Logout</button>
+  </div>
+
+  <div style="text-align:center; margin:80px 0 30px;">
+    <img
+      src="/static/fiorentini-logo.png"
+      alt="Fiorentini"
+      style="width:260px; max-width:70%;"
+    >
+  </div>
+
+  <div style="text-align:center; margin-top:20px;">
+    <p style="font-size:14px; color:#1f1f1f;">
+      This application was built for Fiorentini Restaurant by Eris Corbaxhi
+    </p>
   </div>
 </div>
 
@@ -1723,20 +1740,20 @@ UI_HTML = """
     <button onclick="createSubmission()">Create submission</button>
   </div>
 
-  <div class="card">
+  <div class="card owner-admin-section">
     <h2>5) Generate AI Insight (owner only)</h2>
     <label>Submission ID</label>
     <input id="ai_sub_id" value="1" />
     <button onclick="generateAI()">Generate AI insight</button>
   </div>
 
-  <div class="card">
+  <div class="card owner-admin-section">
     <h2>6) Weekly Report</h2>
     <button onclick="getWeeklyReport()">Get weekly report (JSON)</button>
     <p><a href="/reports/weekly-ai/download" target="_blank">Download weekly report (.txt)</a></p>
   </div>
 
-  <div class="card">
+  <div class="card admin-only-section">
     <h2>Output</h2>
     <div id="status"></div>
     <pre id="out"></pre>
@@ -1761,9 +1778,12 @@ UI_HTML = """
   }
 
   function refreshTokenBox(){
-    const t = getToken();
-    document.getElementById("token_box").textContent = t ? t : "(none)";
-  }
+    const tokenBox = document.getElementById("token_box");
+    if(tokenBox){
+      const t = getToken();
+      tokenBox.textContent = t ? t : "(none)";
+    }
+ }
 
   async function api(path, method="GET", body=null){
     const headers = { "accept": "application/json" };
@@ -1812,6 +1832,7 @@ UI_HTML = """
       };
       const data = await api("/auth/login", "POST", payload);
       localStorage.setItem("token", data.access_token);
+      localStorage.setItem("role", data.role);
       refreshTokenBox();
       showApp();
       setStatus("Logged in ✅");
@@ -1824,15 +1845,28 @@ UI_HTML = """
   
 function logout(){
   localStorage.removeItem("token");
+  localStorage.removeItem("role");
   refreshTokenBox();
   setStatus("Logged out ✅");
   setOut("");
   showLogin();
 }
 
-function showApp(){
+function showApp() {
   document.getElementById("loginSection").style.display = "none";
   document.getElementById("appSection").style.display = "block";
+
+  const role = localStorage.getItem("role");
+
+  document.querySelectorAll(".owner-admin-section").forEach(el => {
+    el.style.display =
+      (role === "owner" || role === "admin") ? "block" : "none";
+  });
+
+  document.querySelectorAll(".admin-only-section").forEach(el => {
+    el.style.display =
+      (role === "admin") ? "block" : "none";
+  });
 }
 
 function showLogin(){
