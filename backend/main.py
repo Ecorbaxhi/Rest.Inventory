@@ -1678,6 +1678,10 @@ UI_HTML = """
 <div id="appSection" style="display:none;">
 
   <div class="card">
+    <button onclick="logout()">Logout</button>
+  </div>
+
+  <div class="card">
     <h2>3) Add Catalog Item</h2>
 
     <label>Product Name</label>
