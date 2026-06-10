@@ -1,6 +1,10 @@
 import os
+from dotenv import load_dotenv
 from sqlalchemy import create_engine, text
 
+load_dotenv()
+
+# Database configuration
 def get_database_url() -> str:
     url = os.environ.get("DATABASE_URL")
     if not url:

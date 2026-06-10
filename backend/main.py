@@ -21,10 +21,26 @@ from fastapi.responses import HTMLResponse
 
 from sqlalchemy import text
 from sqlalchemy import create_engine
-from backend.db import db_ping
+from backend.db import db_ping, engine
+
+from backend.db_users import db_get_user_by_email, db_create_user
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+
+# -------------------------------------------------
+# Password hashing helper
+# -------------------------------------------------
+
+import hashlib
+
+def hash_password(password: str) -> str:
+    """
+    Simple password hashing using SHA-256.
+    Note: In production, use bcrypt or similar.
+    """
+    return hashlib.sha256(password.encode()).hexdigest()
 
 
 
@@ -36,32 +52,50 @@ app = FastAPI(title="Rest.Inventory API")
 
 
 class UserRole(str):
+    ADMIN = "admin"
     OWNER = "owner"
     KITCHEN = "kitchen"
     FLOOR = "floor"
 
 
 class UserCreate(BaseModel):
-    name: str
     email: str
-    role: str = Field(..., description="one of: owner, kitchen, floor")
+    role: str = Field(..., description="one of: admin, owner, kitchen, floor")
     password: str
 
 
 class User(BaseModel):
     id: int
-    name: str
     email: str
     role: str
-    password: str
+    is_approved: bool
+    approved_by: Optional[int] = None
+    approval_date: Optional[datetime] = None
     created_at: datetime
 
 
 class UserPublic(BaseModel):
     id: int
-    name: str
     email: str
     role: str
+    is_approved: bool
+    created_at: datetime
+
+
+class UserApprovalResponse(BaseModel):
+    id: int
+    email: str
+    role: str
+    is_approved: bool
+    approved_by: Optional[int] = None
+    approval_date: Optional[datetime] = None
+
+
+class PendingUserResponse(BaseModel):
+    id: int
+    email: str
+    role: str
+    is_approved: bool
     created_at: datetime
 
 
@@ -83,21 +117,70 @@ class TokenResponse(BaseModel):
 
 
 # -------------------------------------------------
+# Models for Catalog
+# -------------------------------------------------
+
+class CatalogItemCreate(BaseModel):
+    name: str
+    category: Optional[str] = None
+    unit: Optional[str] = None
+    price: Optional[float] = None
+
+
+class CatalogItem(BaseModel):
+    id: int
+    name: str
+    category: Optional[str] = None
+    unit: Optional[str] = None
+    price: Optional[float] = None
+    is_active: bool
+    created_by: int
+    created_at: datetime
+
+
+class CatalogRequestCreate(BaseModel):
+    item_id: int
+    reason: Optional[str] = None
+
+
+class CatalogRequestStatus(str):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
+class CatalogRequest(BaseModel):
+    id: int
+    item_id: int
+    requested_by: int
+    status: str
+    reason: Optional[str] = None
+    approved_by: Optional[int] = None
+    created_at: datetime
+
+
+# -------------------------------------------------
 # Models for Submissions
 # -------------------------------------------------
 
+class SubmissionItemCreate(BaseModel):
+    catalog_item_id: int = Field(..., description="Catalog item ID")
+    quantity: float = Field(..., ge=0, description="Quantity requested")
+    comment: Optional[str] = Field(None, description="Optional note")
 
-class ItemSelection(BaseModel):
-    product_id: int = Field(..., description="Internal numeric product id (placeholder for now)")
-    quantity_needed: float = Field(..., ge=0, description="Quantity requested by staff")
-    comment: Optional[str] = Field(None, description="Optional note from staff")
+
+class SubmissionItem(BaseModel):
+    id: int
+    submission_id: int
+    catalog_item_id: int
+    quantity: float
+    comment: Optional[str] = None
+    created_at: datetime
 
 
 class SubmissionCreate(BaseModel):
-    items: List[ItemSelection]
+    items: List[SubmissionItemCreate]
 
-
-# -------- Submission status helpers --------
 
 class SubmissionStatus(str):
     PENDING = "pending"
@@ -108,12 +191,24 @@ class SubmissionStatus(str):
 class Submission(BaseModel):
     id: int
     submitted_by_user_id: int
-    items: List[ItemSelection]
+    status: str
+    items: List[SubmissionItem]
     created_at: datetime
-    status: str = Field(
-        default=SubmissionStatus.PENDING,
-        description="One of: pending, approved, ordered",
-    )
+    approved_at: Optional[datetime] = None
+    ordered_at: Optional[datetime] = None
+    approved_by: Optional[int] = None
+
+
+class SubmissionDetail(BaseModel):
+    """Submission with full details including item names"""
+    id: int
+    submitted_by_user_id: int
+    status: str
+    created_at: datetime
+    approved_at: Optional[datetime] = None
+    ordered_at: Optional[datetime] = None
+    approved_by: Optional[int] = None
+    items: List[SubmissionItem]
 
 class AIInsight(BaseModel):
     submission_id: int
@@ -128,6 +223,55 @@ class WeeklyAIReport(BaseModel):
     generated_at: datetime
     report_text: str
 
+
+# -------------------------------------------------
+# Dashboard models
+# -------------------------------------------------
+
+class DashboardTimelineItem(BaseModel):
+    date: str
+    submission_count: int
+    total_quantity: float
+    status_breakdown: Dict[str, int]  # {pending: 5, approved: 3, ordered: 2}
+
+
+class DashboardTimeline(BaseModel):
+    period: str  # "daily", "weekly", "monthly"
+    data: List[DashboardTimelineItem]
+
+
+class DashboardTopItem(BaseModel):
+    catalog_item_id: int
+    item_name: str
+    request_count: int
+    total_quantity: float
+    category: Optional[str] = None
+
+
+class DashboardInventoryStatus(BaseModel):
+    total_pending: int
+    total_approved: int
+    total_ordered: int
+    pending_quantity: float
+    approved_quantity: float
+    ordered_quantity: float
+
+
+class DashboardStatistics(BaseModel):
+    total_submissions: int
+    avg_items_per_submission: float
+    approval_rate: float  # percentage
+    submissions_this_week: int
+    most_active_user_id: int
+    most_active_user_submissions: int
+
+
+class DashboardSummary(BaseModel):
+    generated_at: datetime
+    inventory_status: DashboardInventoryStatus
+    statistics: DashboardStatistics
+    top_items: List[DashboardTopItem]
+    recent_timeline: List[DashboardTimelineItem]
 
 
 # -------------------------------------------------
@@ -191,16 +335,13 @@ def startup_event():
 
 
 # -------------------------------------------------
-# In-memory storage
+# In-memory storage (for tokens and AI insights)
 # -------------------------------------------------
 
-USERS: List[User] = []
-SUBMISSIONS: List[Submission] = []
-
-# token -> user_id
+# token -> user_id (for session management)
 ACTIVE_TOKENS: Dict[str, int] = {}
 
-# AI insights in memory
+# AI insights in memory (can be moved to database later)
 AI_INSIGHTS: List[AIInsight] = []
 
 
@@ -211,9 +352,9 @@ AI_INSIGHTS: List[AIInsight] = []
 security = HTTPBearer()
 
 
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> User:
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> dict:
     """
-    Resolve the Bearer token to a User object.
+    Resolve the Bearer token to a User object from database.
     """
     token = credentials.credentials
     user_id = ACTIVE_TOKENS.get(token)
@@ -221,12 +362,16 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
     if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    user = next((u for u in USERS if u.id == user_id), None)
+    # Get user from database
+    sql = text("SELECT * FROM public.users WHERE id = :user_id")
+    with engine.connect() as conn:
+        user = conn.execute(sql, {"user_id": user_id}).mappings().first()
+    
     if user is None:
         # token points to a user that no longer exists
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    return user
+    return dict(user)
 
 
 # -------------------------------------------------
@@ -237,17 +382,6 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
 @app.get("/health")
 def health_check():
     return {"status": "ok", "app": "Rest.Inventory"}
-
-from backend.db import db_ping
-
-@app.get("/db/health")
-def db_health():
-    try:
-        db_ping()
-        return {"db": "ok"}
-    except Exception as e:
-        return {"db": "error", "detail": str(e)}
-
 
 def get_db_engine():
     db_url = os.environ.get("DATABASE_URL")
@@ -271,66 +405,147 @@ def db_health():
 
 
 
-from backend.db import db_ping
-
-@app.get("/db/health")
-def db_health():
-    try:
-        db_ping()
-        return {"db": "ok"}
-    except Exception as e:
-        return {"db": "error", "detail": str(e)}
-
-
 # -------------------------------------------------
 # User endpoints
 # -------------------------------------------------
 
-
-@app.post("/users", response_model=UserPublic)
+@app.post("/users", response_model=UserApprovalResponse)
 def create_user(payload: UserCreate):
     """
-    Create a new user (owner, kitchen, or floor).
+    Create a new user (admin, owner, kitchen, or floor).
+    New users start with is_approved=false and need approval from their superior.
+    Admin users are auto-approved to allow system bootstrap.
     """
-    # basic uniqueness check on email
-    if any(u.email == payload.email for u in USERS):
+    # Check if email already exists
+    existing = db_get_user_by_email(payload.email)
+    if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
 
-    new_id = len(USERS) + 1
-    user = User(
-        id=new_id,
-        name=payload.name,
+    # Validate role
+    valid_roles = {UserRole.ADMIN, UserRole.OWNER, UserRole.KITCHEN, UserRole.FLOOR}
+    if payload.role not in valid_roles:
+        raise HTTPException(status_code=400, detail=f"Invalid role. Must be one of: {', '.join(valid_roles)}")
+
+    # Hash password
+    password_hash = hash_password(payload.password)
+
+    # Create user in DB (starts unapproved)
+    created = db_create_user(
         email=payload.email,
+        password_hash=password_hash,
         role=payload.role,
-        password=payload.password,
-        created_at=datetime.utcnow(),
     )
-    USERS.append(user)
-    # Do NOT return password to the client
-    return UserPublic(
-        id=user.id,
-        name=user.name,
-        email=user.email,
-        role=user.role,
-        created_at=user.created_at,
+
+    # Auto-approve admin users for system bootstrap
+    if payload.role == UserRole.ADMIN:
+        sql_approve = text(f"""
+            UPDATE public.users
+            SET is_approved = true, approved_by = {created['id']}, approval_date = NOW()
+            WHERE id = {created['id']}
+        """)
+        with engine.connect() as conn:
+            conn.execute(sql_approve)
+            conn.commit()
+        created["is_approved"] = True
+        created["approved_by"] = created["id"]
+        created["approval_date"] = datetime.utcnow().isoformat()
+
+    return UserApprovalResponse(
+        id=created["id"],
+        email=created["email"],
+        role=created["role"],
+        is_approved=created.get("is_approved", False),
+        approved_by=created.get("approved_by"),
+        approval_date=created.get("approval_date"),
     )
 
 
-@app.get("/users", response_model=List[UserPublic])
-def list_users():
+@app.get("/users/pending-approval", response_model=List[PendingUserResponse])
+def list_pending_approvals(current_user: User = Depends(get_current_user)):
     """
-    List all users (for debugging / setup).
+    List all users pending approval.
+    - Admin can see all pending users
+    - Owner can see pending kitchen/floor staff
     """
-    return [
-        UserPublic(
-            id=u.id,
-            name=u.name,
-            email=u.email,
-            role=u.role,
-            created_at=u.created_at,
-        )
-        for u in USERS
-    ]
+    if current_user["role"] not in [UserRole.ADMIN, UserRole.OWNER]:
+        raise HTTPException(status_code=403, detail="Only admins and owners can view pending approvals")
+
+    sql = text("""
+        SELECT id, email, role, is_approved, created_at
+        FROM public.users
+        WHERE is_approved = false
+    """)
+
+    # If owner (not admin), only show kitchen/floor staff
+    if current_user["role"] == UserRole.OWNER:
+        sql = text("""
+            SELECT id, email, role, is_approved, created_at
+            FROM public.users
+            WHERE is_approved = false AND role IN ('kitchen', 'floor')
+        """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+        return [dict(row) for row in rows]
+
+
+@app.post("/admin/users/approve/{user_id}", response_model=UserApprovalResponse)
+def admin_approve_user(user_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Admin approves a user (typically the owner).
+    Only admins can call this.
+    """
+    if current_user["role"] != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Only admins can approve users")
+
+    sql_get = text("SELECT * FROM public.users WHERE id = :user_id")
+    sql_approve = text("""
+        UPDATE public.users 
+        SET is_approved = true, approved_by = :admin_id, approval_date = CURRENT_TIMESTAMP
+        WHERE id = :user_id
+        RETURNING id, email, role, is_approved, approved_by, approval_date
+    """)
+
+    with engine.begin() as conn:
+        # Check user exists
+        user = conn.execute(sql_get, {"user_id": user_id}).mappings().first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+
+        # Approve the user
+        approved_user = conn.execute(sql_approve, {"user_id": user_id, "admin_id": current_user["id"]}).mappings().first()
+        return dict(approved_user)
+
+
+@app.post("/owner/users/approve/{user_id}", response_model=UserApprovalResponse)
+def owner_approve_user(user_id: int, current_user: User = Depends(get_current_user)):
+    """
+    Owner approves a user (kitchen/floor staff).
+    Only owners can call this.
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owners can approve users")
+
+    sql_get = text("SELECT * FROM public.users WHERE id = :user_id")
+    sql_approve = text("""
+        UPDATE public.users 
+        SET is_approved = true, approved_by = :owner_id, approval_date = CURRENT_TIMESTAMP
+        WHERE id = :user_id AND role IN ('kitchen', 'floor')
+        RETURNING id, email, role, is_approved, approved_by, approval_date
+    """)
+
+    with engine.begin() as conn:
+        # Check user exists and is kitchen/floor
+        user = conn.execute(sql_get, {"user_id": user_id}).mappings().first()
+        if not user:
+            raise HTTPException(status_code=404, detail="User not found")
+        
+        if user["role"] not in ["kitchen", "floor"]:
+            raise HTTPException(status_code=400, detail="Owner can only approve kitchen or floor staff")
+
+        # Approve the user
+        approved_user = conn.execute(sql_approve, {"user_id": user_id, "owner_id": current_user["id"]}).mappings().first()
+        return dict(approved_user)
 
 
 # -------------------------------------------------
@@ -342,114 +557,493 @@ def list_users():
 def login(payload: LoginRequest):
     """
     Verify email + password and return an access token.
+    User must be approved to log in.
     """
-    user = next((u for u in USERS if u.email == payload.email), None)
-    if user is None or user.password != payload.password:
+    # Get user from database
+    user = db_get_user_by_email(payload.email)
+    if user is None:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
-    # generate a random token and remember which user it belongs to
+    # Verify password
+    password_hash = hash_password(payload.password)
+    if user.get("password_hash") != password_hash:
+        raise HTTPException(status_code=401, detail="Invalid email or password")
+
+    # Check if user is approved
+    if not user.get("is_approved", False):
+        raise HTTPException(status_code=403, detail="User account is not approved yet. Contact your administrator.")
+
+    # Generate token and store it
     access_token = token_hex(16)
-    ACTIVE_TOKENS[access_token] = user.id
+    ACTIVE_TOKENS[access_token] = user["id"]
 
     return TokenResponse(
         access_token=access_token,
         token_type="bearer",
-        user_id=user.id,
-        role=user.role,
+        user_id=user["id"],
+        role=user.get("role", "floor"),
     )
+
+
+# -------------------------------------------------
+# Catalog endpoints
+# -------------------------------------------------
+
+@app.post("/catalog/items", response_model=CatalogItem)
+def create_catalog_item(
+    payload: CatalogItemCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Create a new catalog item.
+    Owners and authorized users can add products directly to the catalog.
+    """
+    sql = text("""
+        INSERT INTO public.catalog_items (name, category, unit, price, is_active, created_by)
+        VALUES (:name, :category, :unit, :price, true, :created_by)
+        RETURNING id, name, category, unit, price, is_active, created_by, created_at
+    """)
+    
+    with engine.begin() as conn:
+        row = conn.execute(sql, {
+            "name": payload.name,
+            "category": payload.category,
+            "unit": payload.unit,
+            "price": payload.price,
+            "created_by": current_user["id"]
+        }).mappings().first()
+        return dict(row)
+
+
+@app.get("/catalog", response_model=List[CatalogItem])
+def list_catalog(only_active: bool = True):
+    """
+    List all catalog items.
+    If only_active=True (default), return only active items.
+    """
+    sql_active = text("SELECT * FROM public.catalog_items WHERE is_active = true ORDER BY category, name")
+    sql_all = text("SELECT * FROM public.catalog_items ORDER BY category, name")
+    
+    sql = sql_active if only_active else sql_all
+    
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+        return [dict(row) for row in rows]
+
+
+@app.get("/catalog/{item_id}", response_model=CatalogItem)
+def get_catalog_item(item_id: int):
+    """
+    Get a single catalog item by ID.
+    """
+    sql = text("SELECT * FROM public.catalog_items WHERE id = :item_id")
+    
+    with engine.connect() as conn:
+        row = conn.execute(sql, {"item_id": item_id}).mappings().first()
+    
+    if not row:
+        raise HTTPException(status_code=404, detail="Catalog item not found")
+    
+    return dict(row)
+
+
+@app.patch("/catalog/{item_id}", response_model=CatalogItem)
+def update_catalog_item(
+    item_id: int,
+    payload: CatalogItemCreate,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Update a catalog item (anyone can request, owner approves).
+    Creates a catalog request for owner to review.
+    """
+    # Check item exists
+    sql_check = text("SELECT * FROM public.catalog_items WHERE id = :item_id")
+    with engine.connect() as conn:
+        item = conn.execute(sql_check, {"item_id": item_id}).mappings().first()
+    
+    if not item:
+        raise HTTPException(status_code=404, detail="Catalog item not found")
+    
+    # Create a catalog request for the update
+    sql_request = text("""
+        INSERT INTO public.catalog_requests (item_id, requested_by, status, reason)
+        VALUES (:item_id, :requested_by, 'pending', :reason)
+        RETURNING id, item_id, requested_by, status, reason, approved_by, created_at
+    """)
+    
+    reason = f"Update: {payload.name} | Category: {payload.category} | Unit: {payload.unit} | Price: {payload.price}"
+    
+    with engine.begin() as conn:
+        request = conn.execute(sql_request, {
+            "item_id": item_id,
+            "requested_by": current_user["id"],
+            "reason": reason
+        }).mappings().first()
+    
+    # Return the current item (not yet updated)
+    return dict(item)
+
+
+@app.post("/catalog/requests/{request_id}/approve", response_model=CatalogItem)
+def approve_catalog_request(
+    request_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Owner approves a catalog item update request.
+    Owner only.
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can approve catalog changes")
+    
+    # Get the request
+    sql_get_request = text("""
+        SELECT * FROM public.catalog_requests WHERE id = :request_id
+    """)
+    
+    with engine.connect() as conn:
+        request = conn.execute(sql_get_request, {"request_id": request_id}).mappings().first()
+    
+    if not request:
+        raise HTTPException(status_code=404, detail="Catalog request not found")
+    
+    if request["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"Request is already {request['status']}")
+    
+    # Approve the request
+    sql_approve = text("""
+        UPDATE public.catalog_requests 
+        SET status = 'approved', approved_by = :approved_by
+        WHERE id = :request_id
+    """)
+    
+    # Activate the item
+    sql_activate = text("""
+        UPDATE public.catalog_items 
+        SET is_active = true
+        WHERE id = :item_id
+        RETURNING id, name, category, unit, price, is_active, created_by, created_at
+    """)
+    
+    with engine.begin() as conn:
+        conn.execute(sql_approve, {"request_id": request_id, "approved_by": current_user["id"]})
+        item = conn.execute(sql_activate, {"item_id": request["item_id"]}).mappings().first()
+    
+    return dict(item)
+
+
+@app.post("/catalog/requests/{request_id}/reject", response_model=CatalogRequest)
+def reject_catalog_request(
+    request_id: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Owner rejects a catalog item request.
+    Owner only.
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can reject catalog changes")
+    
+    # Get the request
+    sql_get_request = text("""
+        SELECT * FROM public.catalog_requests WHERE id = :request_id
+    """)
+    
+    with engine.connect() as conn:
+        request = conn.execute(sql_get_request, {"request_id": request_id}).mappings().first()
+    
+    if not request:
+        raise HTTPException(status_code=404, detail="Catalog request not found")
+    
+    if request["status"] != "pending":
+        raise HTTPException(status_code=400, detail=f"Request is already {request['status']}")
+    
+    # Reject the request
+    sql_reject = text("""
+        UPDATE public.catalog_requests 
+        SET status = 'rejected', approved_by = :approved_by
+        WHERE id = :request_id
+        RETURNING id, item_id, requested_by, status, reason, approved_by, created_at
+    """)
+    
+    with engine.begin() as conn:
+        result = conn.execute(sql_reject, {"request_id": request_id, "approved_by": current_user["id"]}).mappings().first()
+    
+    return dict(result)
+
+
+@app.get("/catalog/requests/pending", response_model=List[CatalogRequest])
+def get_pending_catalog_requests(current_user: dict = Depends(get_current_user)):
+    """
+    List all pending catalog requests (owner only).
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can view pending requests")
+    
+    sql = text("""
+        SELECT * FROM public.catalog_requests 
+        WHERE status = 'pending'
+        ORDER BY created_at DESC
+    """)
+    
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+        return [dict(row) for row in rows]
 
 
 # -------------------------------------------------
 # Submissions endpoints
 # -------------------------------------------------
 
-
-@app.post("/submissions", response_model=Submission)
+@app.post("/submissions", response_model=SubmissionDetail)
 def create_submission(
     payload: SubmissionCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
-    Create a new inventory submission linked to the authenticated user.
+    Create a new inventory submission with items from the catalog.
     """
-    new_id = len(SUBMISSIONS) + 1
-    submission = Submission(
-        id=new_id,
-        submitted_by_user_id=current_user.id,
-        items=payload.items,
-        created_at=datetime.utcnow(),
-        status=SubmissionStatus.PENDING,  # NEW
+    # Validate all catalog items exist
+    for item in payload.items:
+        sql_check = text("SELECT id FROM public.catalog_items WHERE id = :item_id")
+        with engine.connect() as conn:
+            check = conn.execute(sql_check, {"item_id": item.catalog_item_id}).scalar()
+        if not check:
+            raise HTTPException(status_code=404, detail=f"Catalog item {item.catalog_item_id} not found")
+
+    # Create submission
+    sql_submission = text("""
+        INSERT INTO public.submissions (submitted_by_user_id, status)
+        VALUES (:user_id, 'pending')
+        RETURNING id, submitted_by_user_id, status, created_at, approved_at, ordered_at, approved_by
+    """)
+
+    with engine.begin() as conn:
+        submission = conn.execute(sql_submission, {"user_id": current_user["id"]}).mappings().first()
+        submission_id = submission["id"]
+
+        # Add items to submission
+        sql_items = text("""
+            INSERT INTO public.submission_items (submission_id, catalog_item_id, quantity, comment)
+            VALUES (:submission_id, :catalog_item_id, :quantity, :comment)
+            RETURNING id, submission_id, catalog_item_id, quantity, comment, created_at
+        """)
+
+        items = []
+        for item in payload.items:
+            item_row = conn.execute(sql_items, {
+                "submission_id": submission_id,
+                "catalog_item_id": item.catalog_item_id,
+                "quantity": item.quantity,
+                "comment": item.comment
+            }).mappings().first()
+            items.append(dict(item_row))
+
+    return SubmissionDetail(
+        id=submission["id"],
+        submitted_by_user_id=submission["submitted_by_user_id"],
+        status=submission["status"],
+        created_at=submission["created_at"],
+        approved_at=submission["approved_at"],
+        ordered_at=submission["ordered_at"],
+        approved_by=submission["approved_by"],
+        items=items
     )
-    SUBMISSIONS.append(submission)
-    return submission
 
 
-
-@app.get("/submissions", response_model=List[Submission])
-def list_submissions(current_user: User = Depends(get_current_user)):
+@app.get("/submissions", response_model=List[SubmissionDetail])
+def list_submissions(current_user: dict = Depends(get_current_user)):
     """
     List all submissions.
-    Only the owner is allowed to see every submission.
+    Only the owner/admin can see all submissions.
     """
-    if current_user.role != UserRole.OWNER:
+    if current_user["role"] not in [UserRole.OWNER, UserRole.ADMIN]:
         raise HTTPException(
             status_code=403,
-            detail="Only the owner can view all submissions.",
+            detail="Only owner/admin can view all submissions.",
         )
-    return SUBMISSIONS
+
+    sql = text("""
+        SELECT id, submitted_by_user_id, status, created_at, approved_at, ordered_at, approved_by
+        FROM public.submissions
+        ORDER BY created_at DESC
+    """)
+
+    with engine.connect() as conn:
+        submissions = conn.execute(sql).mappings().all()
+
+    result = []
+    for sub in submissions:
+        # Get items for this submission
+        sql_items = text("""
+            SELECT id, submission_id, catalog_item_id, quantity, comment, created_at
+            FROM public.submission_items
+            WHERE submission_id = :submission_id
+        """)
+        with engine.connect() as conn:
+            items = conn.execute(sql_items, {"submission_id": sub["id"]}).mappings().all()
+
+        result.append(SubmissionDetail(
+            id=sub["id"],
+            submitted_by_user_id=sub["submitted_by_user_id"],
+            status=sub["status"],
+            created_at=sub["created_at"],
+            approved_at=sub["approved_at"],
+            ordered_at=sub["ordered_at"],
+            approved_by=sub["approved_by"],
+            items=[dict(i) for i in items]
+        ))
+
+    return result
 
 
-@app.get("/submissions/me", response_model=List[Submission])
-def list_my_submissions(current_user: User = Depends(get_current_user)):
+@app.get("/submissions/me", response_model=List[SubmissionDetail])
+def list_my_submissions(current_user: dict = Depends(get_current_user)):
     """
     List submissions created by the currently authenticated user.
-    Kitchen/floor staff will use this to see their own requests.
     """
-    return [
-        s for s in SUBMISSIONS
-        if s.submitted_by_user_id == current_user.id
-    ]
+    sql = text("""
+        SELECT id, submitted_by_user_id, status, created_at, approved_at, ordered_at, approved_by
+        FROM public.submissions
+        WHERE submitted_by_user_id = :user_id
+        ORDER BY created_at DESC
+    """)
+
+    with engine.connect() as conn:
+        submissions = conn.execute(sql, {"user_id": current_user["id"]}).mappings().all()
+
+    result = []
+    for sub in submissions:
+        sql_items = text("""
+            SELECT id, submission_id, catalog_item_id, quantity, comment, created_at
+            FROM public.submission_items
+            WHERE submission_id = :submission_id
+        """)
+        with engine.connect() as conn:
+            items = conn.execute(sql_items, {"submission_id": sub["id"]}).mappings().all()
+
+        result.append(SubmissionDetail(
+            id=sub["id"],
+            submitted_by_user_id=sub["submitted_by_user_id"],
+            status=sub["status"],
+            created_at=sub["created_at"],
+            approved_at=sub["approved_at"],
+            ordered_at=sub["ordered_at"],
+            approved_by=sub["approved_by"],
+            items=[dict(i) for i in items]
+        ))
+
+    return result
 
 
 class SubmissionStatusUpdate(BaseModel):
     status: str = Field(..., description="One of: pending, approved, ordered")
 
 
-@app.patch("/submissions/{submission_id}/status", response_model=Submission)
+@app.patch("/submissions/{submission_id}/status", response_model=SubmissionDetail)
 def update_submission_status(
     submission_id: int,
     payload: SubmissionStatusUpdate,
-    current_user: User = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Update the status of a submission.
-    Only the owner is allowed to change status.
+    Only the owner/admin are allowed to change status.
     """
-    if current_user.role != UserRole.OWNER:
+    if current_user["role"] not in [UserRole.OWNER, UserRole.ADMIN]:
         raise HTTPException(
             status_code=403,
-            detail="Only the owner can update submission status.",
+            detail="Only owner/admin can update submission status.",
         )
 
-    # validate requested status
-    allowed = {
-        SubmissionStatus.PENDING,
-        SubmissionStatus.APPROVED,
-        SubmissionStatus.ORDERED,
-    }
+    # Validate status
+    allowed = {SubmissionStatus.PENDING, SubmissionStatus.APPROVED, SubmissionStatus.ORDERED}
     if payload.status not in allowed:
         raise HTTPException(
             status_code=400,
-            detail=f"Invalid status '{payload.status}'. "
-                   f"Allowed: {', '.join(sorted(allowed))}.",
+            detail=f"Invalid status '{payload.status}'. Allowed: {', '.join(sorted(allowed))}.",
         )
 
-    submission = next((s for s in SUBMISSIONS if s.id == submission_id), None)
-    if submission is None:
+    # Update submission
+    sql_update = text("""
+        UPDATE public.submissions 
+        SET status = :status, approved_by = :approved_by, approved_at = CURRENT_TIMESTAMP
+        WHERE id = :submission_id
+        RETURNING id, submitted_by_user_id, status, created_at, approved_at, ordered_at, approved_by
+    """)
+
+    with engine.begin() as conn:
+        submission = conn.execute(sql_update, {
+            "submission_id": submission_id,
+            "status": payload.status,
+            "approved_by": current_user["id"]
+        }).mappings().first()
+
+    if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
 
-    submission.status = payload.status
-    return submission
+    # Get items
+    sql_items = text("""
+        SELECT id, submission_id, catalog_item_id, quantity, comment, created_at
+        FROM public.submission_items
+        WHERE submission_id = :submission_id
+    """)
+    with engine.connect() as conn:
+        items = conn.execute(sql_items, {"submission_id": submission_id}).mappings().all()
+
+    return SubmissionDetail(
+        id=submission["id"],
+        submitted_by_user_id=submission["submitted_by_user_id"],
+        status=submission["status"],
+        created_at=submission["created_at"],
+        approved_at=submission["approved_at"],
+        ordered_at=submission["ordered_at"],
+        approved_by=submission["approved_by"],
+        items=[dict(i) for i in items]
+    )
+
+
+@app.get("/submissions/approved", response_model=List[SubmissionDetail])
+def get_approved_submissions(current_user: dict = Depends(get_current_user)):
+    """
+    List all approved submissions ready for purchase (owner only).
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can view approved submissions")
+
+    sql = text("""
+        SELECT id, submitted_by_user_id, status, created_at, approved_at, ordered_at, approved_by
+        FROM public.submissions
+        WHERE status = 'approved'
+        ORDER BY created_at DESC
+    """)
+
+    with engine.connect() as conn:
+        submissions = conn.execute(sql).mappings().all()
+
+    result = []
+    for sub in submissions:
+        sql_items = text("""
+            SELECT id, submission_id, catalog_item_id, quantity, comment, created_at
+            FROM public.submission_items
+            WHERE submission_id = :submission_id
+        """)
+        with engine.connect() as conn:
+            items = conn.execute(sql_items, {"submission_id": sub["id"]}).mappings().all()
+
+        result.append(SubmissionDetail(
+            id=sub["id"],
+            submitted_by_user_id=sub["submitted_by_user_id"],
+            status=sub["status"],
+            created_at=sub["created_at"],
+            approved_at=sub["approved_at"],
+            ordered_at=sub["ordered_at"],
+            approved_by=sub["approved_by"],
+            items=[dict(i) for i in items]
+        ))
+
+    return result
 
 # -------------------------------------------------
 # AI Insight endpoints
@@ -459,34 +1053,62 @@ def update_submission_status(
 @app.post("/submissions/{submission_id}/ai-insights", response_model=AIInsight)
 def create_ai_insight_for_submission(
     submission_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     Generate an AI summary for a given submission (owner only).
     Calls Gemini, stores the AI insight in memory, and returns it.
     """
     # Only owner can call this
-    if current_user.role != UserRole.OWNER:
+    if current_user["role"] != UserRole.OWNER:
         raise HTTPException(
             status_code=403,
             detail="Only the owner can generate AI insights.",
         )
 
-    # Find the submission
-    submission = next((s for s in SUBMISSIONS if s.id == submission_id), None)
-    if submission is None:
+    # Get submission from database
+    sql = text("""
+        SELECT id, submitted_by_user_id, status, created_at, approved_at, ordered_at, approved_by
+        FROM public.submissions
+        WHERE id = :submission_id
+    """)
+
+    with engine.connect() as conn:
+        submission = conn.execute(sql, {"submission_id": submission_id}).mappings().first()
+
+    if not submission:
         raise HTTPException(status_code=404, detail="Submission not found")
+
+    # Get submission items
+    sql_items = text("""
+        SELECT id, submission_id, catalog_item_id, quantity, comment, created_at
+        FROM public.submission_items
+        WHERE submission_id = :submission_id
+    """)
+
+    with engine.connect() as conn:
+        items = conn.execute(sql_items, {"submission_id": submission_id}).mappings().all()
+
+    submission_obj = Submission(
+        id=submission["id"],
+        submitted_by_user_id=submission["submitted_by_user_id"],
+        status=submission["status"],
+        items=[dict(i) for i in items],
+        created_at=submission["created_at"],
+        approved_at=submission["approved_at"],
+        ordered_at=submission["ordered_at"],
+        approved_by=submission["approved_by"]
+    )
 
     # Call Gemini + build AIInsight
     try:
-        insight = generate_ai_summary_for_submission(submission)
+        insight = generate_ai_summary_for_submission(submission_obj)
     except RuntimeError as e:
         # e.g. missing GOOGLE_API_KEY
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         print("DEBUG unexpected AI error:", repr(e))
         raise HTTPException(status_code=500, detail=f"LLM error: {repr(e)}")
-
 
     # IMPORTANT: actually return the AIInsight object
     print("DEBUG endpoint returning insight: submission_id=", insight.submission_id)
@@ -495,11 +1117,11 @@ def create_ai_insight_for_submission(
 
 
 @app.get("/ai-insights", response_model=List[AIInsight])
-def list_ai_insights(current_user: User = Depends(get_current_user)):
+def list_ai_insights(current_user: dict = Depends(get_current_user)):
     """
     List all AI insights (owner only).
     """
-    if current_user.role != UserRole.OWNER:
+    if current_user["role"] != UserRole.OWNER:
         raise HTTPException(
             status_code=403, detail="Only the owner can view AI insights."
         )
@@ -509,12 +1131,12 @@ def list_ai_insights(current_user: User = Depends(get_current_user)):
 @app.get("/ai-insights/{submission_id}", response_model=List[AIInsight])
 def list_ai_insights_for_submission(
     submission_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: dict = Depends(get_current_user),
 ):
     """
     List AI insights for a specific submission (owner only).
     """
-    if current_user.role != UserRole.OWNER:
+    if current_user["role"] != UserRole.OWNER:
         raise HTTPException(
             status_code=403, detail="Only the owner can view AI insights."
         )
@@ -527,12 +1149,12 @@ def list_ai_insights_for_submission(
 
 
 @app.get("/reports/weekly-ai", response_model=WeeklyAIReport)
-def get_weekly_ai_report(current_user: User = Depends(get_current_user)):
+def get_weekly_ai_report(current_user: dict = Depends(get_current_user)):
     """
     Return the current 'weekly' AI inventory report as JSON.
     Owner only.
     """
-    if current_user.role != UserRole.OWNER:
+    if current_user["role"] != UserRole.OWNER:
         raise HTTPException(
             status_code=403,
             detail="Only the owner can view AI reports.",
@@ -545,12 +1167,12 @@ def get_weekly_ai_report(current_user: User = Depends(get_current_user)):
     )
 
 @app.get("/reports/weekly-ai/download")
-def download_weekly_ai_report(current_user: User = Depends(get_current_user)):
+def download_weekly_ai_report(current_user: dict = Depends(get_current_user)):
     """
     Download the current 'weekly' AI report as a plain text file.
     Owner only.
     """
-    if current_user.role != UserRole.OWNER:
+    if current_user["role"] != UserRole.OWNER:
         raise HTTPException(
             status_code=403,
             detail="Only the owner can download AI reports.",
@@ -563,6 +1185,247 @@ def download_weekly_ai_report(current_user: User = Depends(get_current_user)):
     }
     return Response(content=report_text, media_type="text/plain", headers=headers)
 
+
+# -------------------------------------------------
+# Dashboard endpoints (Owner only)
+# -------------------------------------------------
+
+@app.get("/dashboards/inventory-status", response_model=DashboardInventoryStatus)
+def get_inventory_status(current_user: dict = Depends(get_current_user)):
+    """
+    Get current inventory status summary (owner only).
+    Shows breakdown by status: pending, approved, ordered.
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can view dashboards")
+
+    sql = text("""
+        SELECT 
+            status,
+            COUNT(*) as count,
+            COALESCE(SUM(submission_items.quantity), 0) as total_quantity
+        FROM public.submissions
+        LEFT JOIN public.submission_items ON submissions.id = submission_items.submission_id
+        GROUP BY status
+    """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+
+    status_data = {row["status"]: row for row in rows}
+
+    return DashboardInventoryStatus(
+        total_pending=int(status_data.get("pending", {}).get("count", 0)),
+        total_approved=int(status_data.get("approved", {}).get("count", 0)),
+        total_ordered=int(status_data.get("ordered", {}).get("count", 0)),
+        pending_quantity=float(status_data.get("pending", {}).get("total_quantity", 0)),
+        approved_quantity=float(status_data.get("approved", {}).get("total_quantity", 0)),
+        ordered_quantity=float(status_data.get("ordered", {}).get("total_quantity", 0)),
+    )
+
+
+@app.get("/dashboards/top-items", response_model=List[DashboardTopItem])
+def get_top_items(current_user: dict = Depends(get_current_user), limit: int = 10):
+    """
+    Get most frequently requested catalog items (owner only).
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can view dashboards")
+
+    sql = text(f"""
+        SELECT 
+            catalog_items.id as catalog_item_id,
+            catalog_items.name as item_name,
+            catalog_items.category,
+            COUNT(submission_items.id) as request_count,
+            COALESCE(SUM(submission_items.quantity), 0) as total_quantity
+        FROM public.catalog_items
+        LEFT JOIN public.submission_items ON catalog_items.id = submission_items.catalog_item_id
+        GROUP BY catalog_items.id, catalog_items.name, catalog_items.category
+        ORDER BY request_count DESC
+        LIMIT {limit}
+    """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+
+    return [
+        DashboardTopItem(
+            catalog_item_id=row["catalog_item_id"],
+            item_name=row["item_name"],
+            request_count=int(row["request_count"]),
+            total_quantity=float(row["total_quantity"]),
+            category=row["category"]
+        )
+        for row in rows
+    ]
+
+
+@app.get("/dashboards/statistics", response_model=DashboardStatistics)
+def get_statistics(current_user: dict = Depends(get_current_user)):
+    """
+    Get overall inventory statistics (owner only).
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can view dashboards")
+
+    # Total submissions
+    sql_total = text("SELECT COUNT(*) as count FROM public.submissions")
+    with engine.connect() as conn:
+        total_subs = conn.execute(sql_total).scalar()
+
+    # Average items per submission
+    sql_avg = text("""
+        SELECT COALESCE(AVG(item_count), 0) as avg_items
+        FROM (
+            SELECT COUNT(id) as item_count
+            FROM public.submission_items
+            GROUP BY submission_id
+        ) counts
+    """)
+    with engine.connect() as conn:
+        avg_items = float(conn.execute(sql_avg).scalar())
+
+    # Approval rate
+    sql_approved = text("""
+        SELECT COUNT(*) as approved_count
+        FROM public.submissions
+        WHERE status IN ('approved', 'ordered')
+    """)
+    with engine.connect() as conn:
+        approved_count = conn.execute(sql_approved).scalar()
+
+    approval_rate = (approved_count / total_subs * 100) if total_subs > 0 else 0
+
+    # Submissions this week
+    sql_this_week = text("""
+        SELECT COUNT(*) as count
+        FROM public.submissions
+        WHERE created_at >= CURRENT_DATE - INTERVAL '7 days'
+    """)
+    with engine.connect() as conn:
+        this_week = conn.execute(sql_this_week).scalar()
+
+    # Most active user
+    sql_active = text("""
+        SELECT submitted_by_user_id, COUNT(*) as submission_count
+        FROM public.submissions
+        GROUP BY submitted_by_user_id
+        ORDER BY submission_count DESC
+        LIMIT 1
+    """)
+    with engine.connect() as conn:
+        active_user = conn.execute(sql_active).mappings().first()
+
+    most_active_user_id = active_user["submitted_by_user_id"] if active_user else 0
+    most_active_count = active_user["submission_count"] if active_user else 0
+
+    return DashboardStatistics(
+        total_submissions=int(total_subs),
+        avg_items_per_submission=avg_items,
+        approval_rate=approval_rate,
+        submissions_this_week=int(this_week),
+        most_active_user_id=most_active_user_id,
+        most_active_user_submissions=int(most_active_count),
+    )
+
+
+@app.get("/dashboards/sales-timeline", response_model=DashboardTimeline)
+def get_sales_timeline(
+    current_user: dict = Depends(get_current_user),
+    period: str = "daily",
+    days: int = 30
+):
+    """
+    Get sales timeline over specified period (owner only).
+    Period can be: daily, weekly, or monthly
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can view dashboards")
+
+    # Build SQL based on period
+    if period == "daily":
+        date_format = "YYYY-MM-DD"
+        interval_str = f"{days} days"
+    elif period == "weekly":
+        date_format = "YYYY-W"
+        interval_str = f"{days * 7} days"
+    elif period == "monthly":
+        date_format = "YYYY-MM"
+        interval_str = f"{days} months"
+    else:
+        raise HTTPException(status_code=400, detail="Period must be daily, weekly, or monthly")
+
+    # Get raw data with status for each submission
+    sql = text(f"""
+        SELECT 
+            TO_CHAR(submissions.created_at, '{date_format}') as date,
+            submissions.status,
+            COUNT(DISTINCT submissions.id) as submission_count,
+            COALESCE(SUM(submission_items.quantity), 0) as total_quantity
+        FROM public.submissions
+        LEFT JOIN public.submission_items ON submissions.id = submission_items.submission_id
+        WHERE submissions.created_at >= CURRENT_DATE - INTERVAL '{interval_str}'
+        GROUP BY TO_CHAR(submissions.created_at, '{date_format}'), submissions.status
+        ORDER BY date DESC
+    """)
+
+    with engine.connect() as conn:
+        rows = conn.execute(sql).mappings().all()
+
+    # Aggregate results by date
+    aggregated = {}
+    for row in rows:
+        date = row["date"]
+        if date not in aggregated:
+            aggregated[date] = {
+                "date": date,
+                "submission_count": 0,
+                "total_quantity": 0,
+                "status_breakdown": {}
+            }
+        aggregated[date]["submission_count"] += row["submission_count"]
+        aggregated[date]["total_quantity"] += row["total_quantity"]
+        aggregated[date]["status_breakdown"][row["status"]] = row["submission_count"]
+
+    timeline_items = []
+    for date in sorted(aggregated.keys(), reverse=True):
+        data = aggregated[date]
+        timeline_items.append(DashboardTimelineItem(
+            date=data["date"],
+            submission_count=int(data["submission_count"]),
+            total_quantity=float(data["total_quantity"]),
+            status_breakdown=data["status_breakdown"]
+        ))
+
+    return DashboardTimeline(
+        period=period,
+        data=timeline_items
+    )
+
+
+@app.get("/dashboards/summary", response_model=DashboardSummary)
+def get_dashboard_summary(current_user: dict = Depends(get_current_user)):
+    """
+    Get comprehensive dashboard summary (owner only).
+    Combines inventory status, statistics, top items, and recent timeline.
+    """
+    if current_user["role"] != UserRole.OWNER:
+        raise HTTPException(status_code=403, detail="Only owner can view dashboards")
+
+    # Get all dashboard components
+    inventory = get_inventory_status(current_user)
+    stats = get_statistics(current_user)
+    top_items = get_top_items(current_user, limit=5)
+    timeline = get_sales_timeline(current_user, period="daily", days=7)
+
+    return DashboardSummary(
+        generated_at=datetime.utcnow(),
+        inventory_status=inventory,
+        statistics=stats,
+        top_items=top_items,
+        recent_timeline=timeline.data[:7]
+    )
 
 
 from fastapi.responses import Response
@@ -785,6 +1648,7 @@ UI_HTML = """
       <div>
         <label>Role</label>
         <select id="cu_role">
+          <option value="admin">admin</option>
           <option value="owner">owner</option>
           <option value="kitchen">kitchen</option>
           <option value="floor">floor</option>
@@ -798,7 +1662,7 @@ UI_HTML = """
     <button onclick="createUser()">Create user</button>
   </div>
 
-  <div class="card">
+    <div class="card">
     <h2>2) Login (get token)</h2>
     <label>Email</label>
     <input id="li_email" placeholder="owner@test.com" />
@@ -810,7 +1674,30 @@ UI_HTML = """
   </div>
 
   <div class="card">
-    <h2>3) Create Submission (as logged-in user)</h2>
+    <h2>3) Add Catalog Item</h2>
+
+    <label>Product Name</label>
+    <input id="cat_name" placeholder="Tomato Sauce" />
+
+    <label>Season Category</label>
+    <select id="cat_category">
+      <option value="Spring">Spring</option>
+      <option value="Summer">Summer</option>
+      <option value="August">August</option>
+      <option value="Winter">Winter</option>
+    </select>
+
+    <label>Unit</label>
+    <input id="cat_unit" placeholder="bottle" />
+
+    <label>Price</label>
+    <input id="cat_price" type="number" step="0.01" placeholder="12.50" />
+
+    <button onclick="createCatalogItem()">Add Catalog Item</button>
+  </div>
+
+  <div class="card">
+    <h2>4) Create Submission (as logged-in user)</h2>
     <p>Paste items JSON (matches your SubmissionCreate schema):</p>
     <textarea id="sub_json" rows="8">{
   "items": [
@@ -822,14 +1709,14 @@ UI_HTML = """
   </div>
 
   <div class="card">
-    <h2>4) Generate AI Insight (owner only)</h2>
+    <h2>5) Generate AI Insight (owner only)</h2>
     <label>Submission ID</label>
     <input id="ai_sub_id" value="1" />
     <button onclick="generateAI()">Generate AI insight</button>
   </div>
 
   <div class="card">
-    <h2>5) Weekly Report</h2>
+    <h2>6) Weekly Report</h2>
     <button onclick="getWeeklyReport()">Get weekly report (JSON)</button>
     <p><a href="/reports/weekly-ai/download" target="_blank">Download weekly report (.txt)</a></p>
   </div>
@@ -917,49 +1804,68 @@ UI_HTML = """
     }
   }
 
-  function logout(){
-    localStorage.removeItem("token");
-    refreshTokenBox();
-    setStatus("Logged out ✅");
-    setOut("");
-  }
+function logout(){
+  localStorage.removeItem("token");
+  refreshTokenBox();
+  setStatus("Logged out ✅");
+  setOut("");
+}
 
-  async function createSubmission(){
-    try{
-      const raw = document.getElementById("sub_json").value;
-      const payload = JSON.parse(raw);
-      const data = await api("/submissions", "POST", payload);
-      setStatus("Submission created ✅");
-      setOut(data);
-      document.getElementById("ai_sub_id").value = data.id;
-    }catch(e){
-      setStatus("Create submission failed ❌ " + e.message, false);
-      setOut(e.message);
-    }
-  }
+async function createCatalogItem(){
+  try{
+    const payload = {
+      name: document.getElementById("cat_name").value,
+      category: document.getElementById("cat_category").value,
+      unit: document.getElementById("cat_unit").value,
+      price: Number(document.getElementById("cat_price").value)
+    };
 
-  async function generateAI(){
-    try{
-      const id = document.getElementById("ai_sub_id").value;
-      const data = await api(`/submissions/${id}/ai-insights`, "POST", {});
-      setStatus("AI insight generated ✅");
-      setOut(data);
-    }catch(e){
-      setStatus("AI insight failed ❌ " + e.message, false);
-      setOut(e.message);
-    }
-  }
+    const data = await api("/catalog/items", "POST", payload);
 
-  async function getWeeklyReport(){
-    try{
-      const data = await api("/reports/weekly-ai", "GET");
-      setStatus("Weekly report loaded ✅");
-      setOut(data);
-    }catch(e){
-      setStatus("Weekly report failed ❌ " + e.message, false);
-      setOut(e.message);
-    }
+    setStatus("Catalog item added ✅");
+    setOut(data);
+  }catch(e){
+    setStatus("Add catalog item failed ❌ " + e.message, false);
+    setOut(e.message);
   }
+}
+
+async function createSubmission(){
+  try{
+    const raw = document.getElementById("sub_json").value;
+    const payload = JSON.parse(raw);
+    const data = await api("/submissions", "POST", payload);
+    setStatus("Submission created ✅");
+    setOut(data);
+    document.getElementById("ai_sub_id").value = data.id;
+  }catch(e){
+    setStatus("Create submission failed ❌ " + e.message, false);
+    setOut(e.message);
+  }
+}
+
+async function generateAI(){
+  try{
+    const id = document.getElementById("ai_sub_id").value;
+    const data = await api(`/submissions/${id}/ai-insights`, "POST", {});
+    setStatus("AI insight generated ✅");
+    setOut(data);
+  }catch(e){
+    setStatus("AI insight failed ❌ " + e.message, false);
+    setOut(e.message);
+  }
+}
+
+async function getWeeklyReport(){
+  try{
+    const data = await api("/reports/weekly-ai", "GET");
+    setStatus("Weekly report loaded ✅");
+    setOut(data);
+  }catch(e){
+    setStatus("Weekly report failed ❌ " + e.message, false);
+    setOut(e.message);
+  }
+}
 
   refreshTokenBox();
 </script>
