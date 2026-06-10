@@ -1662,8 +1662,9 @@ UI_HTML = """
     <button onclick="createUser()">Create user</button>
   </div>
 
+  <div id="loginSection">
     <div class="card">
-    <h2>2) Login (get token)</h2>
+      <h2>Login</h2>
     <label>Email</label>
     <input id="li_email" placeholder="owner@test.com" />
     <label>Password</label>
@@ -1672,6 +1673,9 @@ UI_HTML = """
     <p>Token: <code id="token_box">(none)</code></p>
     <button onclick="logout()">Logout</button>
   </div>
+</div>
+
+<div id="appSection" style="display:none;">
 
   <div class="card">
     <h2>3) Add Catalog Item</h2>
@@ -1726,6 +1730,8 @@ UI_HTML = """
     <div id="status"></div>
     <pre id="out"></pre>
   </div>
+
+</div>
 
 <script>
   function setStatus(msg, ok=true){
@@ -1796,6 +1802,7 @@ UI_HTML = """
       const data = await api("/auth/login", "POST", payload);
       localStorage.setItem("token", data.access_token);
       refreshTokenBox();
+      showApp();
       setStatus("Logged in ✅");
       setOut(data);
     }catch(e){
@@ -1803,12 +1810,23 @@ UI_HTML = """
       setOut(e.message);
     }
   }
-
+  
 function logout(){
   localStorage.removeItem("token");
   refreshTokenBox();
   setStatus("Logged out ✅");
   setOut("");
+  showLogin();
+}
+
+function showApp(){
+  document.getElementById("loginSection").style.display = "none";
+  document.getElementById("appSection").style.display = "block";
+}
+
+function showLogin(){
+  document.getElementById("loginSection").style.display = "block";
+  document.getElementById("appSection").style.display = "none";
 }
 
 async function createCatalogItem(){
@@ -1868,6 +1886,12 @@ async function getWeeklyReport(){
 }
 
   refreshTokenBox();
+
+  if(getToken()){
+    showApp();
+  }else{
+    showLogin();
+  }
 </script>
 </body>
 </html>
