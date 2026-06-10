@@ -1632,7 +1632,7 @@ UI_HTML = """
   <h1>Rest.Inventory — Demo UI</h1>
   <p>This page calls your FastAPI endpoints directly (same server). Token is stored in localStorage.</p>
 
-  <div class="card">
+  <div class="card" id="createUserCard" style="display:none;">
     <h2>1) Create User</h2>
     <div class="row">
       <div>
